@@ -169,7 +169,6 @@ app_telegram = Application.builder().token(TELEGRAM_TOKEN).build()
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 أهلاً بك!\nاكتب: ابحث عن + اسم المنتج.")
 
-
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip()
     if not msg.startswith("ابحث عن"):
@@ -195,7 +194,6 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_photo(collage, caption=caption)
 
-
 app_telegram.add_handler(CommandHandler("start", start))
 app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
 
@@ -210,10 +208,16 @@ def home():
     return "Bot Running!", 200
 
 
+# ❌ ممنوع async هنا — Flask لا يقبله
+# ✔️ هذا الإصلاح النهائي
 @flask_app.route("/webhook", methods=["POST"])
-async def webhook():
-    update = Update.de_json(await request.get_json(), bot)
-    await app_telegram.process_update(update)
+def webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, bot)
+
+    # تشغيل المعالجة داخل PTB بشكل async في الخلفية
+    asyncio.get_event_loop().create_task(app_telegram.process_update(update))
+
     return "OK", 200
 
 
