@@ -1,34 +1,37 @@
 import asyncio
-import hashlib
 import os
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from io import BytesIO
+import hashlib
+
 import requests
-from flask import Flask, request
+from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFont
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
+# =============================
+# 🔧 تحميل المتغيرات البيئية
+# =============================
+load_dotenv()
 
-# =============================
-# 🔐 مفاتيح AliExpress + Telegram
-# =============================
-TELEGRAM_TOKEN = "8541254004:AAEYMKlnRm18J5Z0nuIZIH5qRH-j-Pk6Z2M"
-ALI_APP_KEY = "516620"
-ALI_APP_SECRET = "sGFK8XUOvgXSrpd4DOx5Jf4Z9PMv3wvW"
-ALI_TRACKING_ID = "deals48"
-ALI_COUNTRY = "IL"
-ALI_CURRENCY = "USD"
-ALI_LANGUAGE = "EN"
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+ALI_APP_KEY = os.environ.get("KEY")
+ALI_APP_SECRET = os.environ.get("SECRET")
+ALI_TRACKING_ID = os.environ.get("TRACKING_ID")
+ALI_COUNTRY = os.environ.get("COUNTRY_CODE", "IL")
+ALI_CURRENCY = os.environ.get("CURRENCY", "USD")
+LOADING_STICKER = os.environ.get("LOADING_STICKER")
 
 TAOBAO_API_URL = "https://eco.taobao.com/router/rest"
 
-bot = Bot(token=TELEGRAM_TOKEN)
-
+# سعر صرف تقريبي من دولار إلى شيكل (يمكنك تغييره من ENV أو من هنا)
+USD_TO_ILS = float(os.environ.get("USD_TO_ILS", "3.6"))
 
 # =============================
-# 🔏 دالة التوقيع
+#   🔏 دالة التوقيع لطلب AliExpress
 # =============================
 def sign_request(params: dict, secret: str) -> str:
     params_to_sign = {k: v for k, v in params.items() if k != "sign" and v is not None}
@@ -39,13 +42,13 @@ def sign_request(params: dict, secret: str) -> str:
 
 
 # =============================
-# 🔍 البحث في AliExpress
+#   🔍 دالة SmartMatch للبحث عن المنتجات
 # =============================
-async def ali_smartmatch_search(keyword: str):
+async def ali_smartmatch_search(keyword: str, page_no: int = 1, page_size: int = 20):
     try:
         tz = ZoneInfo("Asia/Shanghai")
         timestamp = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
-    except:
+    except Exception:
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
     params = {
@@ -56,9 +59,15 @@ async def ali_smartmatch_search(keyword: str):
         "format": "json",
         "v": "2.0",
         "keywords": keyword,
-        "fields": "product_title,product_main_image_url,sale_price,app_sale_price,evaluate_score,commission_rate,promotion_link",
+        "page_no": str(page_no),
+        "page_size": str(page_size),
+        "fields": (
+            "product_title,product_main_image_url,"
+            "sale_price,app_sale_price,evaluate_score,"
+            "commission_rate,promotion_link"
+        ),
         "target_currency": ALI_CURRENCY,
-        "target_language": ALI_LANGUAGE,
+        "target_language": "EN",
         "tracking_id": ALI_TRACKING_ID,
         "country": ALI_COUNTRY,
     }
@@ -66,46 +75,76 @@ async def ali_smartmatch_search(keyword: str):
     params["sign"] = sign_request(params, ALI_APP_SECRET)
 
     def do_request():
-        r = requests.post(TAOBAO_API_URL, data=params, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=15)
+        r = requests.post(
+            TAOBAO_API_URL,
+            data=params,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
+        )
         r.raise_for_status()
         return r.json()
 
     data = await asyncio.to_thread(do_request)
 
     products = []
-    try:
-        envelope = next(v for k, v in data.items() if k.endswith("_response"))
-        resp = envelope.get("resp_result") or {}
-        result = resp.get("result") or resp
 
+    try:
+        response_envelope = next(v for k, v in data.items() if k.endswith("_response"))
+        resp_result = response_envelope.get("resp_result") or {}
+        result = resp_result.get("result") or resp_result
         raw_products = (
             result.get("products")
             or result.get("product_list")
             or result.get("result_list")
             or []
         )
-
         if isinstance(raw_products, dict):
             raw_products = raw_products.get("product", []) or raw_products.get("result", [])
 
         for p in raw_products:
-            products.append({
-                "title": p.get("product_title"),
-                "image": p.get("product_main_image_url"),
-                "price": p.get("app_sale_price") or p.get("sale_price"),
-                "rating": p.get("evaluate_score"),
-                "link": p.get("promotion_link"),
-            })
+            title = p.get("product_title")
+            image = p.get("product_main_image_url")
+            price = p.get("app_sale_price") or p.get("sale_price")
+            link = p.get("promotion_link")
 
+            if not (title and image and price and link):
+                continue
+
+            products.append(
+                {
+                    "title": title,
+                    "image": image,
+                    "price_raw": price,
+                    "link": link,
+                }
+            )
     except Exception as e:
-        print("Parsing error:", e)
+        print("Parsing error:", e, "RAW:", data)
         return []
 
     return products[:4]
 
 
 # =============================
-# 🖼️ إنشاء كولاج
+#   🧮 تحويل السعر إلى شيكل
+# =============================
+def price_to_ils(price_str: str) -> int | None:
+    """
+    يستخرج أول رقم من النص (مثل 'US $15.99 - 20')
+    ويحوّله إلى شيكل بالتقريب.
+    """
+    if not price_str:
+        return None
+    m = re.search(r"[0-9]+(?:\.[0-9]+)?", str(price_str))
+    if not m:
+        return None
+    usd = float(m.group(0))
+    ils = round(usd * USD_TO_ILS)
+    return int(ils)
+
+
+# =============================
+#   🖼️ إنشاء كولاج 2x2 للمنتجات
 # =============================
 def create_2x2_collage(products):
     thumb_w, thumb_h = 500, 500
@@ -118,7 +157,7 @@ def create_2x2_collage(products):
             r = requests.get(url, timeout=10)
             img = Image.open(BytesIO(r.content)).convert("RGB")
             img.thumbnail((thumb_w, thumb_h))
-        except:
+        except Exception:
             img = Image.new("RGB", (thumb_w, thumb_h), (200, 200, 200))
 
         canvas = Image.new("RGB", (thumb_w, thumb_h), "white")
@@ -127,7 +166,6 @@ def create_2x2_collage(products):
 
     collage_w = 2 * thumb_w + 3 * padding
     collage_h = 2 * thumb_h + 3 * padding
-
     collage = Image.new("RGB", (collage_w, collage_h), "white")
 
     positions = [
@@ -144,7 +182,8 @@ def create_2x2_collage(products):
     font = ImageFont.load_default()
 
     for i, pos in enumerate(positions):
-        draw.text((pos[0] + 20, pos[1] + 20), str(i + 1), fill="black", font=font)
+        x, y = pos
+        draw.text((x + 20, y + 20), str(i + 1), fill="black", font=font)
 
     out = BytesIO()
     collage.save(out, format="JPEG")
@@ -153,71 +192,94 @@ def create_2x2_collage(products):
 
 
 # =============================
-# 🤖 بوت تيليجرام
+#   🤖 بوت تيليجرام (Polling)
 # =============================
-app_telegram = Application.builder().token(TELEGRAM_TOKEN).build()
+WELCOME_MESSAGE = (
+    "👋 أهلاً بك في بوت البحث في AliExpress.\n\n"
+    "اكتب:\n"
+    "`ابحث عن اسم المنتج`\n\n"
+    "مثال:\n"
+    "`ابحث عن ساعة ذكية` أو `ابحث عن ايفون 15`"
+)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 أهلاً بك! اكتب: ابحث عن + اسم المنتج.")
+    await update.message.reply_text(WELCOME_MESSAGE, parse_mode="Markdown")
+
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message.text.strip()
-    if not msg.startswith("ابحث عن"):
+    message = update.message
+    text = (message.text or "").strip()
+
+    if not text.startswith("ابحث عن"):
+        await message.reply_text("🤖 لبدء البحث، اكتب: ابحث عن + اسم المنتج\nمثال: ابحث عن باور بنك")
         return
 
-    keyword = msg.replace("ابحث عن", "").strip()
-    await update.message.reply_text("⏳ نبحث لك عن أفضل المنتجات...")
-
-    products = await ali_smartmatch_search(keyword)
-    if not products:
-        await update.message.reply_text("⚠️ لم نجد منتجات، حاول كلمة أخرى.")
+    keyword = text.replace("ابحث عن", "", 1).strip()
+    if not keyword:
+        await message.reply_text("❗ من فضلك اكتب اسم المنتج بعد: ابحث عن")
         return
 
-    collage = create_2x2_collage(products)
+    sticker_msg = None
+    if LOADING_STICKER:
+        try:
+            sticker_msg = await message.reply_sticker(LOADING_STICKER)
+        except Exception:
+            sticker_msg = None
 
-    caption = ""
-    for i, p in enumerate(products, start=1):
-        caption += f"{i}. {p['title']}\nالسعر: {p['price']}\nالرابط: {p['link']}\n\n"
+    try:
+        await message.reply_text(f"🔍 جاري البحث عن: {keyword} ...")
 
-    await update.message.reply_photo(collage, caption=caption)
+        products = await ali_smartmatch_search(keyword)
+
+        if not products:
+            if sticker_msg:
+                await sticker_msg.delete()
+            await message.reply_text("⚠️ لم أجد منتجات مناسبة، حاول كلمة أخرى أو عدّل البحث قليلاً.")
+            return
+
+        # لو أقل من 4 منتجات، نكرر آخر منتج لملء الكولاج
+        if len(products) < 4:
+            while len(products) < 4:
+                products.append(products[-1])
+
+        collage = create_2x2_collage(products)
+
+        caption_lines = []
+        for i, p in enumerate(products[:4], start=1):
+            price_ils = price_to_ils(p["price_raw"])
+            if price_ils is not None:
+                price_line = f"السعر بالشيكل: {price_ils} ₪"
+            else:
+                price_line = f"السعر: {p['price_raw']}"
+
+            line = f"{i}. {p['title']}\n{price_line}\nالرابط: {p['link']}"
+            caption_lines.append(line)
+
+        caption = "\n\n".join(caption_lines)
+
+        if sticker_msg:
+            await sticker_msg.delete()
+
+        await message.reply_photo(photo=collage, caption=caption)
+
+    except Exception as e:
+        if sticker_msg:
+            await sticker_msg.delete()
+        await message.reply_text(f"❌ حدث خطأ أثناء البحث: {e}")
 
 
-app_telegram.add_handler(CommandHandler("start", start))
-app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
+def main():
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN غير موجود في المتغيرات البيئية (.env)")
 
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# =============================
-# 🌐 Flask Webhook
-# =============================
-flask_app = Flask(__name__)
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
 
-@flask_app.route("/", methods=["GET"])
-def home():
-    return "Bot Running!", 200
-
-@flask_app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, bot)
-
-    # إرسال التحديث للـ update_queue بدل loop
-    app_telegram.update_queue.put_nowait(update)
-
-    return "OK", 200
-
-
-# =============================
-# 🚀 إعداد الـ Webhook عند التشغيل
-# =============================
-async def run_webhook():
-    url = "https://deals48.onrender.com/webhook"
-    await bot.delete_webhook()
-    await bot.set_webhook(url=url)
-    print("Webhook Enabled:", url)
+    print("✅ Bot is running with polling...")
+    application.run_polling()
 
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(run_webhook())
-
-    port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port)
+    main()
