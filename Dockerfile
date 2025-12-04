@@ -1,21 +1,10 @@
-FROM python:3.11.2-slim
-
-
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
-
-RUN mkdir -p /app/cache
-
-RUN chown -R appuser:appgroup /app
+FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY --chown=appuser:appgroup requirements.txt .
-
-# Install dependencies
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY --chown=appuser:appgroup . .
+COPY . .
 
-USER appuser
-
-CMD ["sh", "-c", "python keep_alive.py & python main.py"]
+CMD ["python", "main.py"]
