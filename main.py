@@ -28,6 +28,8 @@ ALI_LANGUAGE = "EN"
 
 TAOBAO_API_URL = "https://eco.taobao.com/router/rest"
 
+WEBHOOK_URL = "https://deals48.onrender.com/webhook"
+
 
 # =============================
 #   🔏 دالة التوقيع
@@ -44,11 +46,7 @@ def sign_request(params: dict, secret: str) -> str:
 #   🔍 دالة البحث في AliExpress
 # =============================
 async def ali_smartmatch_search(keyword: str, page_no: int = 1, page_size: int = 20):
-    try:
-        tz = ZoneInfo("Asia/Shanghai")
-        timestamp = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
-    except:
-        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
 
     params = {
         "method": "aliexpress.affiliate.product.smartmatch",
@@ -59,6 +57,7 @@ async def ali_smartmatch_search(keyword: str, page_no: int = 1, page_size: int =
         "v": "2.0",
         "keywords": keyword,
         "page_no": str(page_no),
+        "page_size": str(page_size),
         "fields": (
             "product_title,product_main_image_url,"
             "sale_price,app_sale_price,evaluate_score,"
@@ -79,7 +78,6 @@ async def ali_smartmatch_search(keyword: str, page_no: int = 1, page_size: int =
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=15,
         )
-        r.raise_for_status()
         return r.json()
 
     data = await asyncio.to_thread(do_request)
@@ -87,19 +85,19 @@ async def ali_smartmatch_search(keyword: str, page_no: int = 1, page_size: int =
     products = []
 
     try:
-        response_envelope = next(v for k, v in data.items() if k.endswith("_response"))
-        resp_result = response_envelope.get("resp_result") or {}
-        result = resp_result.get("result") or resp_result
-        raw_products = (
+        envelope = next(v for k, v in data.items() if k.endswith("_response"))
+        resp = envelope.get("resp_result") or {}
+        result = resp.get("result") or resp
+        raw = (
             result.get("products")
             or result.get("product_list")
             or result.get("result_list")
             or []
         )
-        if isinstance(raw_products, dict):
-            raw_products = raw_products.get("product", []) or raw_products.get("result", [])
+        if isinstance(raw, dict):
+            raw = raw.get("product", [])
 
-        for p in raw_products:
+        for p in raw:
             products.append(
                 {
                     "title": p.get("product_title"),
@@ -109,6 +107,7 @@ async def ali_smartmatch_search(keyword: str, page_no: int = 1, page_size: int =
                     "link": p.get("promotion_link"),
                 }
             )
+
     except Exception as e:
         print("Parsing error:", e, "RAW:", data)
         return []
@@ -190,23 +189,29 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     collage = create_2x2_collage(products)
 
-    caption_lines = []
-    for i, p in enumerate(products, start=1):
-        line = f"{i}. {p['title']}\nالسعر: {p['price']}\nالرابط: {p['link']}"
-        caption_lines.append(line)
-
-    caption = "\n\n".join(caption_lines)
+    caption = "\n\n".join(
+        f"{i+1}. {p['title']}\nالسعر: {p['price']}\nالرابط: {p['link']}"
+        for i, p in enumerate(products)
+    )
 
     await update.message.reply_photo(collage, caption=caption)
 
 
-def main():
+# =============================
+#   🚀 تشغيل Webhook على Render
+# =============================
+async def run_webhook():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
-    print("BOT IS RUNNING...")
-    app.run_polling()
+
+    await app.initialize()
+    await app.bot.set_webhook(WEBHOOK_URL)
+    await app.start()
+    print("🚀 BOT IS RUNNING WITH WEBHOOK...")
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(run_webhook())
