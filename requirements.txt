@@ -1,6 +1,8 @@
-python-telegram-bot==20.8
+python-aliexpress-api
 requests
-Pillow
+bs4
+python-telegram-bot==20.6
+python-dotenv
+asyncio
 flask
-httpx
-anyio
+Pillow
