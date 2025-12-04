@@ -25,26 +25,17 @@ TAOBAO_API_URL = "https://eco.taobao.com/router/rest"
 #  💱 سعر صرف الدولار للشيكل
 # =============================
 def usd_to_ils(price_str: str) -> float:
-    """
-    يحوّل السعر بالدولار (نص مثل '12.34' أو '12.34 USD') إلى شيكل.
-    """
     try:
-        # تنظيف النص من عملات أو مسافات
         clean = str(price_str).split()[0].replace("$", "")
         price = float(clean)
-    except Exception:
+    except:
         return 0.0
 
     try:
-        r = requests.get(
-            "https://api.exchangerate.host/latest?base=USD&symbols=ILS",
-            timeout=5,
-        )
-        data = r.json()
-        rate = float(data["rates"]["ILS"])
+        r = requests.get("https://api.exchangerate.host/latest?base=USD&symbols=ILS", timeout=5)
+        rate = r.json()["rates"]["ILS"]
         return round(price * rate, 2)
-    except Exception:
-        # احتياطي تقريباً 3.6
+    except:
         return round(price * 3.6, 2)
 
 
@@ -63,11 +54,8 @@ def sign_request(params: dict, secret: str) -> str:
 #   🔍 SmartMatch API
 # =============================
 async def ali_smartmatch_search(keyword: str):
-    try:
-        tz = ZoneInfo("Asia/Shanghai")
-        timestamp = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    tz = ZoneInfo("Asia/Shanghai")
+    timestamp = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
     params = {
         "method": "aliexpress.affiliate.product.smartmatch",
@@ -90,7 +78,6 @@ async def ali_smartmatch_search(keyword: str):
 
     def do_request():
         r = requests.post(TAOBAO_API_URL, data=params, timeout=15)
-        r.raise_for_status()
         return r.json()
 
     data = await asyncio.to_thread(do_request)
@@ -98,10 +85,9 @@ async def ali_smartmatch_search(keyword: str):
     products = []
 
     try:
-        # بعض ردود AliExpress تكون داخل مفتاح ينتهي بـ "_response"
-        response_envelope = next(v for k, v in data.items() if k.endswith("_response"))
-        resp_result = response_envelope.get("resp_result") or {}
-        result = resp_result.get("result") or resp_result
+        envelope = next(v for k, v in data.items() if k.endswith("_response"))
+        resp = envelope.get("resp_result") or {}
+        result = resp.get("result") or resp
 
         raw_products = (
             result.get("products")
@@ -111,41 +97,31 @@ async def ali_smartmatch_search(keyword: str):
         )
 
         if isinstance(raw_products, dict):
-            raw_products = (
-                raw_products.get("product")
-                or raw_products.get("result")
-                or []
-            )
+            raw_products = raw_products.get("product") or raw_products.get("result") or []
 
         for p in raw_products[:4]:
-            title = p.get("product_title") or "بدون عنوان"
+            title = p.get("product_title", "بدون عنوان")
             image = p.get("product_main_image_url")
-            price_str = (
-                p.get("app_sale_price")
-                or p.get("sale_price")
-                or "0"
-            )
-            link = p.get("promotion_link") or "https://aliexpress.com/"
+            price_str = p.get("app_sale_price") or p.get("sale_price") or "0"
+            link = p.get("promotion_link") or ""
 
             price_ils = usd_to_ils(price_str)
 
-            products.append(
-                {
-                    "title": title,
-                    "image": image,
-                    "price_ils": price_ils,
-                    "link": link,
-                }
-            )
+            products.append({
+                "title": title,
+                "image": image,
+                "price_ils": price_ils,
+                "link": link,
+            })
 
     except Exception as e:
-        print("Parsing error:", e, "RAW:", data)
+        print("Parse error:", e)
 
     return products
 
 
 # =============================
-#   🖼️ كولاج 2×2 مع أرقام
+#   🖼️ كولاج 2×2
 # =============================
 def create_2x2_collage(products):
     thumb_w, thumb_h = 500, 500
@@ -155,12 +131,10 @@ def create_2x2_collage(products):
     for i in range(4):
         url = products[i]["image"]
         try:
-            if not url:
-                raise ValueError("No image URL")
             r = requests.get(url, timeout=10)
             img = Image.open(BytesIO(r.content)).convert("RGB")
             img.thumbnail((thumb_w, thumb_h))
-        except Exception:
+        except:
             img = Image.new("RGB", (thumb_w, thumb_h), (220, 220, 220))
 
         canvas = Image.new("RGB", (thumb_w, thumb_h), "white")
@@ -187,9 +161,10 @@ def create_2x2_collage(products):
     for img, pos in zip(thumbs, positions):
         collage.paste(img, pos)
 
-    # كتابة أرقام 1..4 على كل جزء
+    # كتابة أرقام 1..4
     draw = ImageDraw.Draw(collage)
     font = ImageFont.load_default()
+
     for i, (x, y) in enumerate(positions, start=1):
         draw.text((x + 20, y + 20), str(i), fill="black", font=font)
 
@@ -207,35 +182,56 @@ app = Application.builder().token(TELEGRAM_TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 أهلاً بك في بوت التسوق الذكي!\n"
-        "اكتب:\n"
-        "ابحث عن اسم المنتج\n\n"
-        "مثال:\n"
-        "ابحث عن سماعة بلوتوث"
+        "👋 أهلاً بك!\n"
+        "اكتب: ابحث عن + اسم المنتج.\n"
+        "مثال: ابحث عن سماعة بلوتوث"
     )
 
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
+    text = update.message.text.strip()
+
+    if not text.startswith("ابحث عن"):
         return
 
-    msg = update.message.text.strip()
+    keyword = text.replace("ابحث عن", "").strip()
 
-    if not msg.startswith("ابحث عن"):
-        return
-
-    keyword = msg.replace("ابحث عن", "").strip()
     if not keyword:
         await update.message.reply_text("✏️ اكتب اسم المنتج بعد عبارة: ابحث عن")
         return
 
-    await update.message.reply_text("🔍 جاري البحث عن أفضل المنتجات لك، لحظة من فضلك...")
+    await update.message.reply_text("🔍 جاري البحث ...")
 
     products = await ali_smartmatch_search(keyword)
 
     if not products:
-        await update.message.reply_text("❌ لم أجد منتجات مناسبة لهذه الكلمة، جرّب كلمة أخرى.")
+        await update.message.reply_text("❌ لم أجد نتائج.")
         return
 
-    # لو رجع أقل من 4 منتجات، نكملها بالمنتج الأول مكرر حتى يكتمل الكولاج
-    while len(products) <
+    # 🔧 هنا كان الخطأ — السطر الآن صحيح 100%
+    while len(products) < 4:
+        products.append(products[-1])
+
+    collage = create_2x2_collage(products)
+
+    caption = ""
+    for i, p in enumerate(products[:4], start=1):
+        caption += (
+            f"{i}. {p['title']}\n"
+            f"💰 السعر: {p['price_ils']} ₪\n"
+            f"🔗 {p['link']}\n\n"
+        )
+
+    await update.message.reply_photo(collage, caption=caption)
+
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT, handle_search))
+
+
+# =============================
+#   🚀 تشغيل البوت (Polling)
+# =============================
+if __name__ == "__main__":
+    print("🤖 Bot running...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
