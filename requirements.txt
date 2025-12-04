@@ -1,0 +1,8 @@
+python-aliexpress-api
+requests
+bs4
+python-telegram-bot==20.6
+python-dotenv
+asyncio
+flask
+Pillow
