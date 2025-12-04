@@ -39,9 +39,9 @@ def sign_request(params: dict, secret: str) -> str:
 
 
 # =============================
-# 🔍 دالة البحث في AliExpress
+# 🔍 البحث في AliExpress
 # =============================
-async def ali_smartmatch_search(keyword: str, page_no=1, page_size=20):
+async def ali_smartmatch_search(keyword: str):
     try:
         tz = ZoneInfo("Asia/Shanghai")
         timestamp = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
@@ -56,7 +56,6 @@ async def ali_smartmatch_search(keyword: str, page_no=1, page_size=20):
         "format": "json",
         "v": "2.0",
         "keywords": keyword,
-        "page_no": str(page_no),
         "fields": "product_title,product_main_image_url,sale_price,app_sale_price,evaluate_score,commission_rate,promotion_link",
         "target_currency": ALI_CURRENCY,
         "target_language": ALI_LANGUAGE,
@@ -74,7 +73,6 @@ async def ali_smartmatch_search(keyword: str, page_no=1, page_size=20):
     data = await asyncio.to_thread(do_request)
 
     products = []
-
     try:
         envelope = next(v for k, v in data.items() if k.endswith("_response"))
         resp = envelope.get("resp_result") or {}
@@ -98,6 +96,7 @@ async def ali_smartmatch_search(keyword: str, page_no=1, page_size=20):
                 "rating": p.get("evaluate_score"),
                 "link": p.get("promotion_link"),
             })
+
     except Exception as e:
         print("Parsing error:", e)
         return []
@@ -106,7 +105,7 @@ async def ali_smartmatch_search(keyword: str, page_no=1, page_size=20):
 
 
 # =============================
-# 🖼️ إنشاء كولاج 4 صور
+# 🖼️ إنشاء كولاج
 # =============================
 def create_2x2_collage(products):
     thumb_w, thumb_h = 500, 500
@@ -158,10 +157,8 @@ def create_2x2_collage(products):
 # =============================
 app_telegram = Application.builder().token(TELEGRAM_TOKEN).build()
 
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 أهلاً بك!\nاكتب: ابحث عن + اسم المنتج.")
-
+    await update.message.reply_text("👋 أهلاً بك! اكتب: ابحث عن + اسم المنتج.")
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip()
@@ -172,9 +169,8 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ نبحث لك عن أفضل المنتجات...")
 
     products = await ali_smartmatch_search(keyword)
-
     if not products:
-        await update.message.reply_text("⚠️ لم نجد منتجات! جرّب كلمة أخرى.")
+        await update.message.reply_text("⚠️ لم نجد منتجات، حاول كلمة أخرى.")
         return
 
     collage = create_2x2_collage(products)
@@ -191,32 +187,27 @@ app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_
 
 
 # =============================
-# 🌐 سيرفر Flask + Webhook
+# 🌐 Flask Webhook
 # =============================
 flask_app = Flask(__name__)
-
 
 @flask_app.route("/", methods=["GET"])
 def home():
     return "Bot Running!", 200
-
 
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, bot)
 
-    # إرسال التحديث للـ event loop الخاص بالبوت
-    asyncio.run_coroutine_threadsafe(
-        app_telegram.process_update(update),
-        app_telegram.loop
-    )
+    # إرسال التحديث للـ update_queue بدل loop
+    app_telegram.update_queue.put_nowait(update)
 
     return "OK", 200
 
 
 # =============================
-# 🚀 تشغيل webhook
+# 🚀 إعداد الـ Webhook عند التشغيل
 # =============================
 async def run_webhook():
     url = "https://deals48.onrender.com/webhook"
@@ -229,6 +220,4 @@ if __name__ == "__main__":
     asyncio.get_event_loop().run_until_complete(run_webhook())
 
     port = int(os.environ.get("PORT", 10000))
-    print("Running Flask on port:", port)
-
     flask_app.run(host="0.0.0.0", port=port)
