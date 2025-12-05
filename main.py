@@ -168,7 +168,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =============================
-# 🚀 تشغيل البوت على Render (Polling)
+# 🚀 تشغيل البوت على Render
 # =============================
 async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -177,12 +177,7 @@ async def main():
 
     print("Bot is running...")
 
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-
-    # يبقي البوت شغال دائماً داخل Worker
-    await asyncio.Event().wait()
+    await app.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
