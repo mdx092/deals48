@@ -1,12 +1,12 @@
-import asyncio
 import hashlib
 import requests
 from io import BytesIO
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
+import asyncio
 
 # =============================
 # 🔐 مفاتيح AliExpress + Telegram
@@ -37,20 +37,18 @@ def usd_to_ils(price):
 # =============================
 # 🔏 إنشاء التوقيع
 # =============================
-def sign_request(params: dict, secret: str) -> str:
-    params_to_sign = {k: v for k, v in params.items() if k != "sign" and v is not None}
-    sorted_items = sorted(params_to_sign.items())
+def sign_request(params, secret):
+    sorted_items = sorted((k, v) for k, v in params.items() if k != "sign" and v is not None)
     concat = "".join(f"{k}{v}" for k, v in sorted_items)
     to_sign = f"{secret}{concat}{secret}"
-    return hashlib.md5(to_sign.encode("utf-8")).hexdigest().upper()
+    return hashlib.md5(to_sign.encode()).hexdigest().upper()
 
 
 # =============================
 # 🔍 SmartMatch API
 # =============================
-async def ali_smartmatch_search(keyword: str):
-    tz = ZoneInfo("Asia/Shanghai")
-    timestamp = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+async def ali_smartmatch_search(keyword):
+    timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
 
     params = {
         "method": "aliexpress.affiliate.product.smartmatch",
@@ -72,16 +70,14 @@ async def ali_smartmatch_search(keyword: str):
     params["sign"] = sign_request(params, ALI_APP_SECRET)
 
     def do_request():
-        r = requests.post(TAOBAO_API_URL, data=params, timeout=15)
-        return r.json()
+        return requests.post(TAOBAO_API_URL, data=params, timeout=15).json()
 
     data = await asyncio.to_thread(do_request)
 
     products = []
     try:
         envelope = next(v for k, v in data.items() if k.endswith("_response"))
-        resp = envelope.get("resp_result", {})
-        result = resp.get("result") or resp
+        result = envelope.get("resp_result", {}).get("result", {})
         items = result.get("products") or result.get("product_list") or []
 
         if isinstance(items, dict):
@@ -96,48 +92,10 @@ async def ali_smartmatch_search(keyword: str):
                 "link": p.get("promotion_link"),
             })
 
-    except Exception as e:
-        print("Parsing Error:", e)
+    except:
+        pass
 
     return products
-
-
-# =============================
-# 🖼️ كولاج 2×2
-# =============================
-def create_2x2_collage(products):
-    thumb_w, thumb_h = 500, 500
-    padding = 20
-    thumbs = []
-
-    for i in range(4):
-        url = products[i]["image"]
-        try:
-            r = requests.get(url, timeout=10)
-            img = Image.open(BytesIO(r.content)).convert("RGB")
-            img.thumbnail((thumb_w, thumb_h))
-        except:
-            img = Image.new("RGB", (thumb_w, thumb_h), (200, 200, 200))
-
-        canvas = Image.new("RGB", (thumb_w, thumb_h), "white")
-        canvas.paste(img, ((thumb_w - img.width)//2, (thumb_h - img.height)//2))
-        thumbs.append(canvas)
-
-    collage_w = 2 * thumb_w + 3 * padding
-    collage_h = 2 * thumb_h + 3 * padding
-    collage = Image.new("RGB", (collage_w, collage_h), "white")
-
-    positions = [
-        (padding, padding),
-        (thumb_w + 2 * padding, padding),
-        (padding, thumb_h + 2 * padding),
-        (thumb_w + 2 * padding, thumb_h + 2 * padding),
-    ]
-
-    for img, pos in zip(thumbs, positions):
-        collage.paste(img, pos)
-
-    return collage
 
 
 # =============================
@@ -145,7 +103,6 @@ def create_2x2_collage(products):
 # =============================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
-
     await update.message.reply_text("⏳ جاري البحث…")
 
     products = await ali_smartmatch_search(query)
@@ -154,31 +111,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ لم أجد منتجات كافية.")
         return
 
-    collage = create_2x2_collage(products)
+    # بناء الكولاج
+    collage = Image.new("RGB", (1100, 1100), "white")
+
+    positions = [(0, 0), (550, 0), (0, 550), (550, 550)]
+
+    for i, p in enumerate(products):
+        try:
+            img = requests.get(p["image"], timeout=10)
+            img = Image.open(BytesIO(img.content)).convert("RGB")
+            img.thumbnail((540, 540))
+        except:
+            img = Image.new("RGB", (540, 540), (200, 200, 200))
+
+        collage.paste(img, positions[i])
+
     bio = BytesIO()
     bio.name = "collage.jpg"
     collage.save(bio, "JPEG")
     bio.seek(0)
 
-    text = ""
+    caption = ""
     for i, p in enumerate(products, start=1):
-        text += f"🛒 *{i}. {p['title']}*\n💵 السعر: {p['price_ils']} ₪\n🔗 {p['link']}\n\n"
+        caption += f"⭐ *{p['title']}*\n💵 {p['price_ils']} ₪\n🔗 {p['link']}\n\n"
 
-    await update.message.reply_photo(bio, caption=text, parse_mode="Markdown")
+    await update.message.reply_photo(bio, caption=caption, parse_mode="Markdown")
 
 
 # =============================
-# 🚀 تشغيل البوت على Render
+# 🚀 تشغيل البوت (بدون asyncio.run)
 # =============================
-async def main():
+if __name__ == "__main__":
+    print("Bot is running...")
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Bot is running...")
-
-    await app.run_polling(close_loop=False)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    # النقطة المهمة جداً 🎯
+    # لا نستخدم asyncio.run — Render يمنع ذلك
+    app.run_polling()
