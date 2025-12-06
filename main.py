@@ -82,7 +82,9 @@ async def ali_top_selling(keyword: str):
 
     def do_req():
         r = requests.post(ALI_API_URL, data=params)
-        return r.json()
+        print("ALIEXPRESS RAW RESPONSE:", r.text)
+return r.json()
+
 
     data = await asyncio.to_thread(do_req)
 
