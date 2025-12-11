@@ -23,6 +23,7 @@ TRACKING_ID = os.getenv("TRACKING_ID", "deals48bot")
 # ==========================
 application = Application.builder().token(BOT_TOKEN).build()
 
+
 # ==========================
 # SIGN FUNCTION (AliExpress)
 # ==========================
@@ -30,6 +31,7 @@ def create_sign(params, secret):
     sorted_params = "".join(f"{k}{v}" for k, v in sorted(params.items()))
     sign_str = secret + sorted_params + secret
     return hashlib.md5(sign_str.encode("utf-8")).hexdigest().upper()
+
 
 # ==========================
 # AliExpress PRODUCT SEARCH
@@ -78,11 +80,13 @@ async def ali_search(keyword):
 
     return products
 
+
 # ==========================
 # HANDLERS
 # ==========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("أهلاً! أرسل اسم المنتج للبحث 👇")
+
 
 async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyword = update.message.text.strip()
@@ -101,25 +105,35 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-# Register Telegram Handlers
+
+# Register handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_handler))
+
 
 # ==========================
 # FASTAPI WEBHOOK SERVER
 # ==========================
 app = FastAPI()
 
+
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, application.bot)
+
+    # 🔥 مهم جداً — يجب تهيئة التطبيق قبل معالجة التحديثات
+    if not application._initialized:
+        await application.initialize()
+
     await application.process_update(update)
     return {"ok": True}
+
 
 @app.get("/")
 async def home():
     return {"status": "Bot is running!"}
+
 
 # ==========================
 # STARTUP MESSAGE
