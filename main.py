@@ -5,111 +5,110 @@ import asyncio
 import requests
 from fastapi import FastAPI, Request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    Application, CommandHandler,
+    MessageHandler, filters, ContextTypes
+)
 
-# -------------------------------------------------------------
-#                 إعداد المتغيرات من Render ENV
-# -------------------------------------------------------------
+# ==========================
+# ENVIRONMENT VARIABLES
+# ==========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALI_APP_KEY = os.getenv("ALI_APP_KEY")
 ALI_APP_SECRET = os.getenv("ALI_APP_SECRET")
-ALI_TRACKING_ID = os.getenv("ALI_TRACKING_ID")
+TRACKING_ID = os.getenv("TRACKING_ID", "deals48bot")
 
-# -------------------------------------------------------------
-#                     إنشاء تطبيق Telegram
-# -------------------------------------------------------------
+# ==========================
+# TELEGRAM BOT INIT
+# ==========================
 application = Application.builder().token(BOT_TOKEN).build()
 
-# -------------------------------------------------------------
-#                 دالة جلب المنتجات من AliExpress
-# -------------------------------------------------------------
-async def ali_top_selling(keyword: str):
+# ==========================
+# SIGN FUNCTION (AliExpress)
+# ==========================
+def create_sign(params, secret):
+    sorted_params = "".join(f"{k}{v}" for k, v in sorted(params.items()))
+    sign_str = secret + sorted_params + secret
+    return hashlib.md5(sign_str.encode("utf-8")).hexdigest().upper()
+
+# ==========================
+# AliExpress PRODUCT SEARCH
+# ==========================
+async def ali_search(keyword):
+    url = "https://api.aliexpress.com/sync"
+
     params = {
         "app_key": ALI_APP_KEY,
+        "method": "aliexpress.affiliate.product.query",
         "timestamp": int(time.time() * 1000),
-        "keywords": keyword,
-        "page_size": 4,
-        "page": 1,
-        "tracking_id": ALI_TRACKING_ID,
+        "sign_method": "md5",
+        "format": "json",
+        "v": "2.0",
+        "keyword": keyword,
+        "fields": "product_id,product_title,product_main_image_url,product_detail_url,sale_price",
+        "tracking_id": TRACKING_ID
     }
 
-    sorted_params = "".join(f"{k}{v}" for k, v in sorted(params.items()))
-    sign_string = ALI_APP_SECRET + sorted_params + ALI_APP_SECRET
-    sign = hashlib.md5(sign_string.encode("utf-8")).hexdigest().upper()
+    params["sign"] = create_sign(params, ALI_APP_SECRET)
 
-    params["sign"] = sign
-
-    url = "https://api.aliexpress.com/openapi/param2/2/portals.open/api.listHotProducts/"
-
-    def do_request():
+    def do_req():
+        r = requests.post(url, data=params)
+        print("RAW API RESPONSE:", r.text)
         try:
-            r = requests.get(url, params=params)
-            print("\n💬 RAW RESPONSE:")
-            print(r.text)
-            print("---------------------\n")
             return r.json()
-        except Exception as e:
-            print("❌ JSON ERROR:", e)
+        except:
             return None
 
-    data = await asyncio.to_thread(do_request)
-    return data
+    data = await asyncio.to_thread(do_req)
 
-# -------------------------------------------------------------
-#                دالة معالجة البحث في تيليجرام
-# -------------------------------------------------------------
+    if not data:
+        return []
+
+    response = data.get("aliexpress_affiliate_product_query_response", {})
+    result = response.get("products", {}).get("product", [])
+
+    products = []
+    for item in result[:4]:
+        products.append({
+            "title": item.get("product_title"),
+            "image": item.get("product_main_image_url"),
+            "price": item.get("sale_price"),
+            "url": item.get("product_detail_url"),
+        })
+
+    return products
+
+# ==========================
+# HANDLERS
+# ==========================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("أهلاً! أرسل اسم المنتج للبحث 👇")
+
 async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    
     keyword = update.message.text.strip()
-    await update.message.reply_text(f"🔎 جاري البحث عن: {keyword} ...")
 
-    data = await ali_top_selling(keyword)
-
-    # إذا فشل API
-    if not data or "result" not in data:
-        await update.message.reply_text("❌ لم أتمكن من جلب البيانات من AliExpress")
-        return
-
-    products = data["result"].get("products", [])
+    products = await ali_search(keyword)
 
     if not products:
-        await update.message.reply_text("❌ لم أجد منتجات لهذا البحث.")
+        await update.message.reply_text("❌ لم أجد نتائج، جرّب كلمة أخرى.")
         return
 
-    for p in products:
-        name = p.get("product_title", "No title")
-        price = p.get("sale_price", "N/A")
-        link = p.get("promotion_link", "")
+    msg = "🔍 أفضل 4 نتائج:\n\n"
+    for i, p in enumerate(products, 1):
+        msg += f"⭐ *{i}. {p['title']}*\n"
+        msg += f"💰 السعر: {p['price']}\n"
+        msg += f"🔗 الرابط: {p['url']}\n\n"
 
-        msg = f"🛒 **{name}**\n💵 السعر: {price}\n🔗 الرابط:\n{link}"
-        await update.message.reply_text(msg)
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
-# -------------------------------------------------------------
-#                       أوامر Telegram
-# -------------------------------------------------------------
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("مرحباً! أرسل كلمة بحث للحصول على أفضل المنتجات 🔎")
-
-application.add_handler(CommandHandler("start", start_cmd))
+# Register Telegram Handlers
+application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_handler))
 
-# -------------------------------------------------------------
-#                 إعداد FastAPI + Webhook
-# -------------------------------------------------------------
+# ==========================
+# FASTAPI WEBHOOK SERVER
+# ==========================
 app = FastAPI()
-
-@app.on_event("startup")
-async def startup():
-    print("🚀 Bot initialized!")
-    await application.initialize()
-    await application.start()
-
-@app.on_event("shutdown")
-async def shutdown():
-    await application.stop()
-    await application.shutdown()
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -120,5 +119,11 @@ async def telegram_webhook(request: Request):
 
 @app.get("/")
 async def home():
-    return {"status": "running", "bot": "deals48"}
+    return {"status": "Bot is running!"}
 
+# ==========================
+# STARTUP MESSAGE
+# ==========================
+@app.on_event("startup")
+async def startup_event():
+    print("Bot initialized!")
